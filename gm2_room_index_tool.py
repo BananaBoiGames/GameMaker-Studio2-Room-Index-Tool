@@ -1,6 +1,7 @@
 import os
 import re
 import shutil
+import json
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 
@@ -40,11 +41,87 @@ def dofile(fp, m, log=None):
         return True
     return False
 
+def process_room_creation_code(room_fp, m, log=None):
+    changed = False
+    try:
+        with open(room_fp, encoding="utf-8") as f:
+            room_json = json.load(f)
+    except Exception as e:
+        if log: log(f"couldnt read {room_fp} ({e})\n")
+        return False
+
+    if "creationCode" in room_json and room_json["creationCode"]:
+        cc = room_json["creationCode"]
+        orig = cc
+        def sub(match):
+            prefix = match.group(1)
+            n = match.group(2)
+            if n in m:
+                if log: log(f"   {room_fp} [CreationCode] {prefix} {n} replaced with {m[n]}\n")
+                return f"{prefix} = {m[n]};"
+            else:
+                if log: log(f"   {room_fp} [CreationCode] {prefix} {n} not in map\n")
+                return match.group(0)
+        cc_new = re.sub(r"(target[Rr]ooms?)\s*=\s*(\d+)\s*;", sub, cc)
+        if cc_new != orig:
+            room_json["creationCode"] = cc_new
+            try:
+                shutil.copyfile(room_fp, room_fp+".bak")
+            except:
+                pass
+            with open(room_fp, "w", encoding="utf-8") as f:
+                json.dump(room_json, f, indent=4, ensure_ascii=False)
+            if log: log(f"   wrote {room_fp}\n")
+            changed = True
+
+    # Also, check instances' creationCode
+    if "instances" in room_json:
+        for inst in room_json["instances"]:
+            if "creationCode" in inst and inst["creationCode"]:
+                cc = inst["creationCode"]
+                orig = cc
+                def sub(match):
+                    prefix = match.group(1)
+                    n = match.group(2)
+                    if n in m:
+                        if log: log(f"   {room_fp} [Instance CreationCode] {prefix} {n} replaced with {m[n]}\n")
+                        return f"{prefix} = {m[n]};"
+                    else:
+                        if log: log(f"   {room_fp} [Instance CreationCode] {prefix} {n} not in map\n")
+                        return match.group(0)
+                cc_new = re.sub(r"(target[Rr]ooms?)\s*=\s*(\d+)\s*;", sub, cc)
+                if cc_new != orig:
+                    inst["creationCode"] = cc_new
+                    changed = True
+
+        if changed:
+            try:
+                shutil.copyfile(room_fp, room_fp+".bak")
+            except:
+                pass
+            with open(room_fp, "w", encoding="utf-8") as f:
+                json.dump(room_json, f, indent=4, ensure_ascii=False)
+            if log: log(f"   wrote {room_fp}\n")
+
+    return changed
+
+def process_instance_creation_codes_in_rooms(rooms_folder, m, log):
+    changed = 0
+    # Walk through subfolders in /rooms
+    for root, dirs, files in os.walk(rooms_folder):
+        for f in files:
+            if f.startswith("InstanceCreationCode_inst_") and f.endswith(".gml"):
+                fpath = os.path.join(root, f)
+                log(f" Checking instance creation code: {fpath}\n")
+                if dofile(fpath, m, log):
+                    changed += 1
+    return changed
+
 def find_folders(project):
     folders = []
     for root, dirs, files in os.walk(project):
         for d in dirs:
-            if d.lower() in ("objects", "scripts"):
+            if d.lower() in ("objects", "scripts", "rooms"):
                 folders.append(os.path.join(root, d))
     return folders
 
@@ -52,14 +129,13 @@ def proc(proj, mapping, log):
     ch = 0
     folders = find_folders(proj)
     if not folders:
-        log("No /objects or /scripts folders found in project.\n")
+        log("No /objects, /scripts or /rooms folders found in project.\n")
         return 0
     for folder in folders:
         log(f"Looking in: {folder}\n")
         for root, dirs, files in os.walk(folder):
             for f in files:
                 fpath = os.path.join(root, f)
-                # Only .gml and .yy in objects, only .gml in scripts
                 if "/objects" in root.replace("\\", "/"):
                     if f.endswith(".gml") or f.endswith(".yy"):
                         log(f" Checking file: {fpath}\n")
@@ -70,6 +146,14 @@ def proc(proj, mapping, log):
                         log(f" Checking file: {fpath}\n")
                         if dofile(fpath, mapping, log):
                             ch += 1
+                elif "/rooms" in root.replace("\\", "/"):
+                    if f.endswith(".yy"):
+                        log(f" Checking room CreationCode: {fpath}\n")
+                        if process_room_creation_code(fpath, mapping, log):
+                            ch += 1
+        # process InstanceCreationCode_inst_*.gml in subfolders of /rooms
+        if "/rooms" in folder.replace("\\", "/"):
+            ch += process_instance_creation_codes_in_rooms(folder, mapping, log)
     return ch
 
 def dark(w):
@@ -140,7 +224,7 @@ class App:
         self.log.config(state='normal')
         self.log.delete('1.0',tk.END)
         self.log.config(state='disabled')
-        self.logmsg("Looking for targetRoom/targetRooms assignments in /objects (.gml/.yy) and /scripts (.gml)...\n")
+        self.logmsg("Looking for targetRoom/targetRooms assignments in /objects (.gml/.yy), /scripts (.gml), /rooms (.yy CreationCode), and /rooms/*/InstanceCreationCode_inst_*.gml ...\n")
         c = proc(proj, mapping, self.logmsg)
         self.logmsg(f"\nDone! {c} files changed.\n")
 
